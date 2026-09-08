@@ -39,8 +39,8 @@ impl ThemeChoice {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Dark => "Dark",
-            Self::Light => "Light",
+            Self::Dark => "Dark (Mocha)",
+            Self::Light => "Light (Latte)",
             Self::System => "Follow system",
         }
     }

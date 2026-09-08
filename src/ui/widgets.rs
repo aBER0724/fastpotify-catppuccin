@@ -109,18 +109,6 @@ pub fn paint_shadow(ui: &Ui, palette: &Palette, rect: Rect, radius: f32) {
         .add(shadow.as_shape(rect, CornerRadius::same(radius as u8)));
 }
 
-/// Fills `rect` with a vertical gradient from `top` to `bottom`.
-pub fn paint_vertical_gradient(ui: &Ui, rect: Rect, top: Color32, bottom: Color32) {
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(rect.left_top(), top);
-    mesh.colored_vertex(rect.right_top(), top);
-    mesh.colored_vertex(rect.right_bottom(), bottom);
-    mesh.colored_vertex(rect.left_bottom(), bottom);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    ui.painter().add(egui::Shape::mesh(mesh));
-}
-
 /// Lays out only the rows that intersect the visible area of the enclosing
 /// scroll view. Every row must occupy exactly `row_height`.
 pub fn virtual_rows(
@@ -760,15 +748,12 @@ fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<R
     let playing = is_current && app.believed_playing();
     let hovered = ui.rect_contains_pointer(rect) || response.has_focus();
     if row.picked {
-        // Picked rows read as a block, so a run of them looks like one
-        // thing rather than a stack of hovers. Hovering one still lifts
-        // it, so the pointer is never lost inside the block.
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), palette.surface);
         ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(6),
-            palette
-                .accent
-                .gamma_multiply(if hovered { 0.30 } else { 0.20 }),
+            Rect::from_min_max(rect.min, pos2(rect.left() + 3.0, rect.bottom())),
+            CornerRadius::same(2),
+            palette.accent,
         );
     } else if hovered {
         ui.painter().rect_filled(

@@ -19,13 +19,11 @@ pub mod topbar;
 pub mod widgets;
 pub mod winamp;
 
-use egui::{Align2, Color32, CornerRadius, Frame, Margin, Rect, Stroke, vec2};
-
-use crate::api::models::pick_image;
 use crate::app::App;
 use crate::backend::AuthStatus;
 use crate::model::{Action, Page, ToastKind};
 use crate::theme::{self, Icon};
+use egui::{Align2, CornerRadius, Frame, Margin, Rect, Stroke, vec2};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
@@ -63,65 +61,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     window_resize(ui);
 }
 
-fn page_tint(app: &mut App) -> Option<Color32> {
-    let page = app.page().clone();
-    let image = match &page {
-        Page::Playlist(id) => app
-            .playlist_pages
-            .get(id)
-            .and_then(|page| page.playlist.get())
-            .and_then(|playlist| pick_image(&playlist.images, 300))
-            .map(str::to_string),
-        Page::Album(id) => app
-            .album_pages
-            .get(id)
-            .and_then(|page| page.album.get())
-            .and_then(|album| pick_image(&album.images, 300))
-            .map(str::to_string),
-        Page::Artist(id) => app
-            .artist_pages
-            .get(id)
-            .and_then(|page| page.artist.get())
-            .and_then(|artist| pick_image(&artist.images, 300))
-            .map(str::to_string),
-        Page::Show(id) => app
-            .show_pages
-            .get(id)
-            .and_then(|page| page.show.get())
-            .and_then(|show| pick_image(&show.images, 300))
-            .map(str::to_string),
-        Page::LikedSongs => return Some(Color32::from_rgb(0x50, 0x38, 0xc8)),
-        _ => None,
-    };
-    if !app.settings.accent_from_art && image.is_some() {
-        return None;
-    }
-    match image {
-        Some(url) => app.tint_for(Some(&url)),
-        None => app.now_playing_tint(),
-    }
-}
-
 fn central(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let tint = page_tint(app);
     egui::CentralPanel::default()
         .frame(Frame::new().fill(palette.window))
         .show(ui, |ui| {
-            let rect = ui.max_rect();
-            if let Some(tint) = tint {
-                let strength = if matches!(
-                    app.page(),
-                    Page::Home | Page::Search | Page::Settings | Page::Queue
-                ) {
-                    0.45
-                } else {
-                    0.85
-                };
-                let top = blend(palette.window, tint, strength);
-                let header = Rect::from_min_size(rect.min, vec2(rect.width(), 340.0));
-                widgets::paint_vertical_gradient(ui, header, top, palette.window);
-            }
             ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
             topbar::show(app, ui);
             let page = app.page().clone();
@@ -355,15 +299,6 @@ fn resize_direction(
         (0, 1) => Some((D::South, C::ResizeVertical)),
         _ => None,
     }
-}
-
-pub fn blend(base: Color32, tint: Color32, amount: f32) -> Color32 {
-    let a = egui::Rgba::from(base);
-    let b = egui::Rgba::from(tint);
-    let mixed = a * (1.0 - amount) + b * amount;
-    let mut color = Color32::from(mixed);
-    color[3] = 255;
-    color
 }
 
 fn toasts(app: &mut App, ctx: &egui::Context, bottom_offset: f32) {

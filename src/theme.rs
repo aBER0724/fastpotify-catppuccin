@@ -28,46 +28,48 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// Catppuccin Mocha, with the green accent used for primary actions.
     pub fn dark() -> Self {
         Self {
             dark: true,
-            window: Color32::from_rgb(0x0f, 0x11, 0x14),
-            panel: Color32::from_rgb(0x15, 0x18, 0x1c),
-            surface: Color32::from_rgb(0x1d, 0x21, 0x27),
-            surface_hover: Color32::from_rgb(0x26, 0x2b, 0x33),
-            surface_active: Color32::from_rgb(0x2f, 0x35, 0x3f),
-            outline: Color32::from_rgb(0x2a, 0x30, 0x38),
-            text: Color32::from_rgb(0xf2, 0xf4, 0xf6),
-            secondary: Color32::from_rgb(0xa9, 0xb1, 0xbc),
-            dim: Color32::from_rgb(0x6e, 0x77, 0x84),
-            accent: Color32::from_rgb(0x1e, 0xd7, 0x60),
-            accent_hover: Color32::from_rgb(0x3c, 0xe8, 0x7a),
-            on_accent: Color32::from_rgb(0x0a, 0x14, 0x0e),
-            danger: Color32::from_rgb(0xf5, 0x71, 0x7f),
-            warning: Color32::from_rgb(0xf2, 0xb8, 0x5c),
-            overlay: Color32::from_rgb(0x22, 0x27, 0x2e),
+            window: Color32::from_rgb(0x1e, 0x1e, 0x2e), // Base
+            panel: Color32::from_rgb(0x18, 0x18, 0x25),  // Mantle
+            surface: Color32::from_rgb(0x31, 0x32, 0x44), // Surface 0
+            surface_hover: Color32::from_rgb(0x45, 0x47, 0x5a), // Surface 1
+            surface_active: Color32::from_rgb(0x58, 0x5b, 0x70), // Surface 2
+            outline: Color32::from_rgb(0x45, 0x47, 0x5a), // Surface 1
+            text: Color32::from_rgb(0xcd, 0xd6, 0xf4),   // Text
+            secondary: Color32::from_rgb(0xba, 0xc2, 0xde), // Subtext 1
+            dim: Color32::from_rgb(0x6c, 0x70, 0x86),    // Overlay 0
+            accent: Color32::from_rgb(0xa6, 0xe3, 0xa1), // Green
+            accent_hover: Color32::from_rgb(0x94, 0xe2, 0xd5), // Teal
+            on_accent: Color32::from_rgb(0x11, 0x11, 0x1b), // Crust
+            danger: Color32::from_rgb(0xf3, 0x8b, 0xa8), // Red
+            warning: Color32::from_rgb(0xf9, 0xe2, 0xaf), // Yellow
+            overlay: Color32::from_rgb(0x18, 0x18, 0x25), // Mantle
             shadow: Color32::from_black_alpha(140),
         }
     }
 
+    /// Catppuccin Latte, with the green accent used for primary actions.
     pub fn light() -> Self {
         Self {
             dark: false,
-            window: Color32::from_rgb(0xf8, 0xf9, 0xfb),
-            panel: Color32::from_rgb(0xff, 0xff, 0xff),
-            surface: Color32::from_rgb(0xee, 0xf0, 0xf3),
-            surface_hover: Color32::from_rgb(0xe3, 0xe6, 0xeb),
-            surface_active: Color32::from_rgb(0xd7, 0xdb, 0xe1),
-            outline: Color32::from_rgb(0xdd, 0xe1, 0xe6),
-            text: Color32::from_rgb(0x14, 0x17, 0x1a),
-            secondary: Color32::from_rgb(0x53, 0x5b, 0x66),
-            dim: Color32::from_rgb(0x8b, 0x93, 0x9e),
-            accent: Color32::from_rgb(0x15, 0xa6, 0x4a),
-            accent_hover: Color32::from_rgb(0x12, 0x8f, 0x40),
-            on_accent: Color32::WHITE,
-            danger: Color32::from_rgb(0xd6, 0x3b, 0x4c),
-            warning: Color32::from_rgb(0xb8, 0x7a, 0x14),
-            overlay: Color32::from_rgb(0xff, 0xff, 0xff),
+            window: Color32::from_rgb(0xef, 0xf1, 0xf5), // Base
+            panel: Color32::from_rgb(0xe6, 0xe9, 0xef),  // Mantle
+            surface: Color32::from_rgb(0xcc, 0xd0, 0xda), // Surface 0
+            surface_hover: Color32::from_rgb(0xbc, 0xc0, 0xcc), // Surface 1
+            surface_active: Color32::from_rgb(0xac, 0xb0, 0xbe), // Surface 2
+            outline: Color32::from_rgb(0xbc, 0xc0, 0xcc), // Surface 1
+            text: Color32::from_rgb(0x4c, 0x4f, 0x69),   // Text
+            secondary: Color32::from_rgb(0x5c, 0x5f, 0x77), // Subtext 1
+            dim: Color32::from_rgb(0x9c, 0xa0, 0xb0),    // Overlay 0
+            accent: Color32::from_rgb(0x40, 0xa0, 0x2b), // Green
+            accent_hover: Color32::from_rgb(0x17, 0x92, 0x99), // Teal
+            on_accent: Color32::from_rgb(0xef, 0xf1, 0xf5), // Base
+            danger: Color32::from_rgb(0xd2, 0x0f, 0x39), // Red
+            warning: Color32::from_rgb(0xdf, 0x8e, 0x1d), // Yellow
+            overlay: Color32::from_rgb(0xe6, 0xe9, 0xef), // Mantle
             shadow: Color32::from_black_alpha(50),
         }
     }
@@ -881,6 +883,20 @@ pub fn subtle(ui: &mut egui::Ui, palette: &Palette, label: &str) -> Response {
 mod tests {
     use super::*;
 
+    #[test]
+    fn palettes_use_catppuccin_mocha_and_latte() {
+        let dark = Palette::dark();
+        assert!(dark.dark);
+        assert_eq!(dark.window, Color32::from_rgb(0x1e, 0x1e, 0x2e));
+        assert_eq!(dark.text, Color32::from_rgb(0xcd, 0xd6, 0xf4));
+        assert_eq!(dark.accent, Color32::from_rgb(0xa6, 0xe3, 0xa1));
+
+        let light = Palette::light();
+        assert!(!light.dark);
+        assert_eq!(light.window, Color32::from_rgb(0xef, 0xf1, 0xf5));
+        assert_eq!(light.text, Color32::from_rgb(0x4c, 0x4f, 0x69));
+        assert_eq!(light.accent, Color32::from_rgb(0x40, 0xa0, 0x2b));
+    }
     #[test]
     fn fonts_install_and_layout_emojis() {
         let ctx = egui::Context::default();
