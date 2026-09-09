@@ -45,24 +45,22 @@ pub async fn newer_release(http: &reqwest::Client) -> Result<Option<Release>> {
     )
 }
 
-/// A Fastpotify base version and this fork's optional release revision.
+/// A Fastpotify base version and whether it is this fork's release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Version {
     numbers: [u64; 3],
-    catppuccin_revision: u64,
+    catppuccin: bool,
 }
 
 /// Parse `major.minor.patch` and this fork's stable
-/// `major.minor.patch-catppuccin.N` release tags. Other suffixes are
+/// `major.minor.patch-catppuccin` release tags. Other suffixes are
 /// prereleases and are deliberately ignored by update checks.
 fn parse(version: &str) -> Option<Version> {
     let version = version.trim();
-    let (numbers, catppuccin_revision) = match version.split_once('-') {
-        Some((numbers, suffix)) => {
-            let revision = suffix.strip_prefix("catppuccin.")?.parse().ok()?;
-            (numbers, revision)
-        }
-        None => (version, 0),
+    let (numbers, catppuccin) = match version.split_once('-') {
+        Some((numbers, "catppuccin")) => (numbers, true),
+        Some(_) => return None,
+        None => (version, false),
     };
     let mut parts = numbers.split('.').map(|part| part.parse::<u64>().ok());
     let numbers = [parts.next()??, parts.next()??, parts.next()??];
@@ -71,7 +69,7 @@ fn parse(version: &str) -> Option<Version> {
     }
     Some(Version {
         numbers,
-        catppuccin_revision,
+        catppuccin,
     })
 }
 
@@ -100,12 +98,12 @@ mod tests {
     }
 
     #[test]
-    fn catppuccin_release_revisions_compare_after_the_base_version() {
-        assert!(is_newer("0.7.1-catppuccin.1", "0.7.1"));
-        assert!(is_newer("0.7.1-catppuccin.2", "0.7.1-catppuccin.1"));
-        assert!(is_newer("0.7.2-catppuccin.1", "0.7.1-catppuccin.9"));
-        assert!(!is_newer("0.7.1-catppuccin.1", "0.7.1-catppuccin.1"));
-        assert!(!is_newer("0.7.1-catppuccin.1", "0.7.1-catppuccin.2"));
-        assert!(!is_newer("0.7.1-rc1", "0.7.0-catppuccin.1"));
+    fn catppuccin_release_follows_its_base_version() {
+        assert!(is_newer("0.7.1-catppuccin", "0.7.1"));
+        assert!(is_newer("0.7.2-catppuccin", "0.7.1-catppuccin"));
+        assert!(!is_newer("0.7.1-catppuccin", "0.7.1-catppuccin"));
+        assert!(!is_newer("0.7.1-catppuccin", "0.7.2-catppuccin"));
+        assert!(!is_newer("0.7.1-catppuccin.1", "0.7.1-catppuccin"));
+        assert!(!is_newer("0.7.1-rc1", "0.7.0-catppuccin"));
     }
 }

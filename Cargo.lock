@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "fastpotify"
-version = "0.7.1-catppuccin.1"
+version = "0.7.1-catppuccin"
 dependencies = [
  "aes",
  "anyhow",
