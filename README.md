@@ -21,12 +21,15 @@ A Catppuccin-themed build of [Fastpotify](https://github.com/crmne/fastpotify).
 Choose **Dark (Mocha)**, **Light (Latte)**, or **Follow system** in
 **Settings → Appearance → Theme**.
 
+Automatic and manual update checks use this fork's GitHub Releases page, not
+the upstream Fastpotify releases.
+
 ## Build
 
 Fastpotify requires Rust 1.95 or newer.
 
 ```sh
-git clone <repository-url>
+git clone https://github.com/aBER0724/fastpotify-catppuccin.git
 cd fastpotify-catppuccin
 cargo build --release --locked --no-default-features
 ```

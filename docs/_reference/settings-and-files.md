@@ -110,7 +110,7 @@ main fields are:
 | `milkdrop_fullscreen` | `false` | The MilkDrop window fills the screen |
 | `milkdrop_size` | `640, 480` | The MilkDrop window's size in points |
 | `keep_playing_in_background` | `true` | Close to tray |
-| `check_for_updates` | `true` | Ask GitHub once a day for a newer release |
+| `check_for_updates` | `true` | Ask the Catppuccin fork's GitHub Releases once a day for a newer release |
 | `web_client_id` | none | Optional personal Spotify app id used alongside shared coverage |
 | `personal_app_nudge_at` | none | Last slow-Spotify personal-app reminder, so it appears at most once a day |
 
