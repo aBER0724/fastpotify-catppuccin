@@ -882,7 +882,7 @@ impl Worker {
                     user,
                 } => self.on_web_verified(source, *token, *user),
                 Command::PlaybackAuthorized { access_token } => {
-                    self.connect_engine(Credentials::with_access_token(access_token))
+                    self.on_playback_authorized(access_token);
                 }
                 Command::EngineConnected { engine, error } => {
                     self.on_engine_connected(*engine, error)
@@ -1068,6 +1068,15 @@ impl Worker {
                 self.emit(Event::WebApp {
                     client_id: Some(token.client_id),
                 });
+                if !self.signed_in {
+                    self.signed_in = true;
+                    self.emit(Event::Auth(AuthStatus::Connected {
+                        username: user.name().to_string(),
+                    }));
+                    self.emit(Event::Api(Box::new(ApiResponse::Me(Ok(user.clone())))));
+                    let premium = user.product.as_deref().map(|product| product == "premium");
+                    self.on_account_checked(premium);
+                }
             }
         }
         self.finish_authorization(source);
@@ -1202,6 +1211,17 @@ impl Worker {
     }
 
     // ---- local playback engine -------------------------------------------
+
+    fn on_playback_authorized(&mut self, access_token: String) {
+        let Some(credentials) = playback_credentials(self.api.account(), access_token) else {
+            self.engine_busy = false;
+            self.emit(Event::Playback(LocalPlayback::Failed(
+                "Finish signing in to Spotify before enabling playback.".into(),
+            )));
+            return;
+        };
+        self.connect_engine(credentials);
+    }
 
     fn engine_notify(&self) -> crate::player::Notify {
         let events = self.events.clone();
@@ -1444,7 +1464,9 @@ impl Worker {
         let events = self.events.clone();
         let waker = self.waker.clone();
         tokio::task::spawn_blocking(move || {
-            match crate::zeroconf::discover(std::time::Duration::from_secs(3)) {
+            match crate::zeroconf::discover(std::time::Duration::from_secs(3))
+                .and_then(crate::zeroconf::resolve_receivers)
+            {
                 Ok(receivers) => {
                     let _ = events.send(Event::Receivers(receivers));
                     waker.wake();
@@ -2249,5 +2271,152 @@ mod playlist_cache_tests {
         assert_eq!(stored.snapshot, "second");
         assert!(!path.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Bind a streaming token to an account verified by either Web API grant.
+/// A late browser result after sign-out must not start an anonymous session.
+fn playback_credentials(account: Option<AccountId>, access_token: String) -> Option<Credentials> {
+    let account = account.filter(|account| !account.as_str().is_empty())?;
+    Some(Credentials {
+        username: Some(account.as_str().to_string()),
+        auth_type:
+            librespot_protocol::authentication::AuthenticationType::AUTHENTICATION_SPOTIFY_TOKEN,
+        auth_data: access_token.into_bytes(),
+    })
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+
+    fn worker(
+        name: &str,
+    ) -> (
+        tokio::runtime::Runtime,
+        Worker,
+        std::sync::mpsc::Receiver<Event>,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("fastpotify-auth-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dirs = AppDirs {
+            config: root.join("config"),
+            state: root.join("state"),
+            cache: root.join("cache"),
+        };
+        let settings = crate::settings::Settings::default();
+        let config = crate::app::engine_config(
+            &dirs,
+            &settings,
+            crate::vis::AudioTap::new(),
+            crate::eq::shared(),
+        );
+        let http = reqwest::Client::new();
+        let art = ArtLoader::new(http.clone(), runtime.handle().clone(), dirs.art_cache_dir());
+        let (sender, events) = std::sync::mpsc::channel();
+        let (commands, _) = mpsc::unbounded_channel();
+        let worker = Worker::new(
+            dirs,
+            config,
+            Some("personal".into()),
+            http,
+            art,
+            Arc::new(NetActivity::default()),
+            sender,
+            commands,
+            Waker::default(),
+        );
+        (runtime, worker, events)
+    }
+
+    fn verify(worker: &mut Worker, source: ApiSource, account: &str) {
+        worker.api.set_state(source, SessionState::Authorizing);
+        worker.on_web_verified(
+            source,
+            crate::auth::StoredToken {
+                client_id: if source == ApiSource::Personal {
+                    "personal"
+                } else {
+                    crate::auth::DEFAULT_WEB_CLIENT_ID
+                }
+                .into(),
+                ..Default::default()
+            },
+            User {
+                id: account.into(),
+                display_name: Some("Listener".into()),
+                product: Some("premium".into()),
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn personal_verification_unblocks_sign_in_while_shared_verification_waits() {
+        let (runtime, mut worker, events) = worker("personal-first");
+        let _entered = runtime.enter();
+        worker
+            .api
+            .set_state(ApiSource::Shared, SessionState::Authorizing);
+        verify(&mut worker, ApiSource::Personal, "alice");
+        assert!(worker.signed_in);
+        assert_eq!(worker.premium, Some(true));
+        assert_eq!(
+            worker.api.state(ApiSource::Shared),
+            SessionState::Authorizing
+        );
+        let emitted: Vec<_> = events.try_iter().collect();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, Event::Auth(AuthStatus::Connected { .. })))
+        );
+        assert!(emitted.iter().any(|event| matches!(event, Event::Api(response) if matches!(response.as_ref(), ApiResponse::Me(Ok(user)) if user.id == "alice"))));
+        let credentials =
+            playback_credentials(worker.api.account(), "dummy-streaming-token".into()).unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("alice"));
+        assert_eq!(credentials.auth_data, b"dummy-streaming-token");
+        verify(&mut worker, ApiSource::Shared, "alice");
+        assert!(worker.signed_in);
+        assert_eq!(worker.api.account(), Some(AccountId::new("alice")));
+    }
+
+    #[test]
+    fn a_mismatched_grant_cannot_replace_the_verified_playback_account() {
+        let (runtime, mut worker, events) = worker("mismatch");
+        let _entered = runtime.enter();
+        verify(&mut worker, ApiSource::Shared, "alice");
+        let _ = events.try_iter().collect::<Vec<_>>();
+        verify(&mut worker, ApiSource::Personal, "bob");
+        assert_eq!(worker.api.account(), Some(AccountId::new("alice")));
+        assert_eq!(
+            worker.api.state(ApiSource::Personal),
+            SessionState::Unavailable
+        );
+        assert!(
+            events
+                .try_iter()
+                .any(|event| matches!(event, Event::Error(_)))
+        );
+    }
+
+    #[test]
+    fn a_playback_browser_result_after_sign_out_cannot_start_an_engine() {
+        let (_runtime, mut worker, events) = worker("signed-out");
+        worker.engine_busy = true;
+        worker.on_playback_authorized("dummy-streaming-token".into());
+        assert!(!worker.engine_busy);
+        assert!(worker.engine.is_none());
+        assert!(
+            events
+                .try_iter()
+                .any(|event| matches!(event, Event::Playback(LocalPlayback::Failed(_))))
+        );
+        assert!(playback_credentials(Some(AccountId::new("")), "dummy".into()).is_none());
     }
 }

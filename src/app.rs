@@ -94,6 +94,14 @@ enum TrackConfirmation {
     Remote { after_poll: u64, mismatches: u8 },
 }
 
+/// Upcoming context order before shuffle was toggled, used to detect lagging responses.
+#[derive(Clone, Debug)]
+struct QueueShufflePending {
+    current_uri: Option<String>,
+    context_uris: Vec<String>,
+    at: Instant,
+}
+
 /// The playing item as the interface sees it, whichever device plays it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NowPlaying {
@@ -237,6 +245,8 @@ pub struct App {
     queue_stale_retries: u8,
     /// Rows removed by Clear queue, used to detect stale responses.
     queue_cleared: Option<(std::collections::HashSet<String>, Instant)>,
+    /// Upcoming context order before shuffle was toggled, used to detect lagging responses.
+    queue_shuffle_pending: Option<QueueShufflePending>,
     /// What the window's title bar says, as last set.
     window_title: String,
 
@@ -546,6 +556,7 @@ impl App {
             queue_recheck_at: None,
             queue_stale_retries: 0,
             queue_cleared: None,
+            queue_shuffle_pending: None,
             window_title: String::new(),
             library: Library::default(),
             home: HomeData::default(),
@@ -1441,6 +1452,7 @@ impl App {
         self.saved_recordings.clear();
         self.saved_writes.clear();
         self.queue = Loadable::NotLoaded;
+        self.queue_shuffle_pending = None;
         self.devices.clear();
         self.control_devices_stale = true;
         self.devices_fetched_at = None;
@@ -1635,6 +1647,107 @@ impl App {
         if let Some(page) = Page::decode(&Self::context_page(&context)) {
             self.ensure_loaded(page);
         }
+    }
+
+    /// Where the playing songs come from, for the queue's header: the
+    /// playlist, album, artist, or podcast with its page, Liked Songs, or
+    /// a song radio as plain text because a station has no page. A context
+    /// whose name has not loaded is still named by kind so it can open.
+    pub fn playing_from(&self) -> Option<PlayingFrom> {
+        let context = self.playing_context_uri()?;
+        if context.ends_with(":collection") {
+            return Some(PlayingFrom {
+                name: "Liked Songs".into(),
+                page: Some(Page::LikedSongs),
+            });
+        }
+        if context.starts_with("spotify:station:") {
+            return Some(PlayingFrom {
+                name: self
+                    .station_name(&context)
+                    .unwrap_or_else(|| "Radio".into()),
+                page: None,
+            });
+        }
+        let kind = util::uri_kind(&context)?;
+        let id = util::uri_id(&context)?.to_string();
+        let (name, page) = match kind {
+            "playlist" => {
+                let name = self
+                    .library
+                    .playlists
+                    .get()
+                    .and_then(|list| list.iter().find(|playlist| playlist.id == id))
+                    .map(|playlist| playlist.name.clone())
+                    .or_else(|| {
+                        self.playlist_pages
+                            .get(&id)
+                            .and_then(|page| page.playlist.get())
+                            .map(|playlist| playlist.name.clone())
+                    });
+                (
+                    name.unwrap_or_else(|| "Playlist".into()),
+                    Page::Playlist(id),
+                )
+            }
+            "album" => {
+                let name = self
+                    .album_pages
+                    .get(&id)
+                    .and_then(|page| page.album.get())
+                    .map(|album| album.name.clone())
+                    .or_else(|| {
+                        self.now_playing()
+                            .filter(|now| now.album_id.as_deref() == Some(id.as_str()))
+                            .map(|now| now.album_name)
+                    });
+                (name.unwrap_or_else(|| "Album".into()), Page::Album(id))
+            }
+            "artist" => {
+                let name = self
+                    .artist_pages
+                    .get(&id)
+                    .and_then(|page| page.artist.get())
+                    .map(|artist| artist.name.clone())
+                    .or_else(|| {
+                        self.now_playing().and_then(|now| {
+                            now.artists
+                                .into_iter()
+                                .find(|artist| artist.id.as_deref() == Some(id.as_str()))
+                                .map(|artist| artist.name)
+                        })
+                    });
+                (name.unwrap_or_else(|| "Artist".into()), Page::Artist(id))
+            }
+            "show" => {
+                let name = self
+                    .show_pages
+                    .get(&id)
+                    .and_then(|page| page.show.get())
+                    .map(|show| show.name.clone())
+                    .or_else(|| {
+                        self.library
+                            .shows
+                            .items
+                            .iter()
+                            .find(|saved| saved.show.id == id)
+                            .map(|saved| saved.show.name.clone())
+                    });
+                (name.unwrap_or_else(|| "Podcast".into()), Page::Show(id))
+            }
+            _ => return None,
+        };
+        Some(PlayingFrom {
+            name,
+            page: Some(page),
+        })
+    }
+
+    /// "<Song> Radio" for a song station whose song is cached.
+    fn station_name(&self, context: &str) -> Option<String> {
+        let id = context.strip_prefix("spotify:station:track:")?;
+        let track = self.track_cache.get(id)?;
+        Some(format!("{} Radio", track.name))
     }
 
     /// Encodes a context as a value accepted by `Page::decode`.
@@ -2299,25 +2412,40 @@ impl App {
 
     /// The downloaded file for `url`, once the art cache has it.
     ///
-    /// The media controls are handed a file rather than the URL, so the disk
+    /// Windows and macOS are handed a file rather than the URL, so the disk
     /// is asked until the download lands and the answer remembered after
-    /// that; see `media_native::file_url` for why a URL will not do.
-    fn media_art_file(&mut self, url: &str) -> Option<PathBuf> {
+    /// that; see `media_native::file_url` for why a URL will not do. The
+    /// player bar only ever draws the small cover, so on a miss the full-size
+    /// artwork is fetched here -- the one request the controls add.
+    ///
+    /// MPRIS passes `art_url` to the desktop, which fetches whatever it
+    /// wants: Linux needs no file and downloads nothing extra.
+    fn media_art_file(&mut self, ctx: &egui::Context, url: &str) -> Option<PathBuf> {
+        if cfg!(target_os = "linux") {
+            return None;
+        }
         if let Some((known, file)) = &self.media_art
             && known == url
         {
             return Some(file.clone());
         }
-        let file = self.backend.art().cached_file(url)?;
-        self.media_art = Some((url.to_owned(), file.clone()));
-        Some(file)
+        match self.backend.art().cached_file(url) {
+            Some(file) => {
+                self.media_art = Some((url.to_owned(), file.clone()));
+                Some(file)
+            }
+            None => {
+                self.backend.art().prefetch(ctx, url);
+                None
+            }
+        }
     }
 
-    fn sync_media_controls(&mut self) {
+    fn sync_media_controls(&mut self, ctx: &egui::Context) {
         let art_file = self
             .now_playing()
             .and_then(|now| now.art_url)
-            .and_then(|url| self.media_art_file(&url));
+            .and_then(|url| self.media_art_file(ctx, &url));
         let state = match self.now_playing() {
             Some(now) => MediaState {
                 playback: if now.playing {
@@ -3013,13 +3141,24 @@ impl App {
         if !matches!(self.target(), Target::Local) {
             return;
         }
+        // `queue_one` writes every queued song to both lists, so they hold
+        // the same wishes and adding their counts asks for twice the rows
+        // Next up was given. The extra row taken is the context's own copy
+        // of that song, which stays. Neither list alone is the count
+        // either: a pending add outlives its `manual_queue` entry once the
+        // song starts, and `manual_queue` drops its oldest past a hundred.
+        // Take as many rows as the longer of the two holds.
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for uri in self
-            .manual_queue
-            .iter()
-            .chain(self.pending_queue_adds.iter().map(|(uri, _)| uri))
-        {
+        for uri in &self.manual_queue {
             *counts.entry(uri.clone()).or_insert(0) += 1;
+        }
+        let mut pending: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (uri, _) in &self.pending_queue_adds {
+            *pending.entry(uri.as_str()).or_insert(0) += 1;
+        }
+        for (uri, count) in pending {
+            let held = counts.entry(uri.to_string()).or_insert(0);
+            *held = (*held).max(count);
         }
         if let Loadable::Loaded(queue) = &mut self.queue {
             // Remove one row per queued copy, starting at the front.
@@ -3067,10 +3206,9 @@ impl App {
     /// Name for a playlist created from the queue.
     pub fn queue_playlist_name(&self) -> String {
         if let Some(context) = self.playing_context_uri()
-            && let Some(id) = context.strip_prefix("spotify:station:track:")
-            && let Some(track) = self.track_cache.get(id)
+            && let Some(name) = self.station_name(&context)
         {
-            return format!("{} Radio", track.name);
+            return name;
         }
         let today = jiff::Zoned::now().strftime("%Y-%m-%d").to_string();
         format!("Queue {today}")
@@ -3145,6 +3283,24 @@ impl App {
                 .is_some_and(|item| cleared.contains(item.uri()))
         {
             return true;
+        }
+        // An unchanged context order right after toggling shuffle means the
+        // reordered queue has not landed yet.
+        if let Some(pending) = &self.queue_shuffle_pending
+            && pending.at.elapsed() < PLAYBACK_HOLD
+            && fetched.currently_playing.as_ref().map(|item| item.uri())
+                == pending.current_uri.as_deref()
+        {
+            let at = Self::end_of_queued_rows(&fetched.queue, &self.manual_queue);
+            let fetched_context = &fetched.queue[at..];
+            if fetched_context.len() == pending.context_uris.len()
+                && fetched_context
+                    .iter()
+                    .map(|item| item.uri())
+                    .eq(pending.context_uris.iter().map(String::as_str))
+            {
+                return true;
+            }
         }
         false
     }
@@ -3384,6 +3540,7 @@ impl App {
                 self.queue_stale_retries = 0;
                 if result.is_ok() {
                     self.queue_cleared = None;
+                    self.queue_shuffle_pending = None;
                 }
                 self.queue = Loadable::from_result(result);
                 self.reconcile_pending_queue();
@@ -4204,6 +4361,14 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.remote_recheck_at = Some(Instant::now() + REMOTE_RECHECK);
+                        if action == RemoteAction::Shuffle {
+                            self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+                            if let Some(pending) = &mut self.queue_shuffle_pending {
+                                pending.at = Instant::now();
+                            } else {
+                                self.note_shuffle_pending();
+                            }
+                        }
                     }
                     Err(error) => {
                         self.optimistic_playing = None;
@@ -4526,9 +4691,11 @@ impl App {
         // Shuffle applies across contexts until disabled. A selected row still
         // starts first; otherwise choose a random starting track.
         let mut request = request;
+        self.queue_shuffle_pending = None;
         if shuffle_first {
             self.shuffle_wanted = true;
             self.shuffle_set_at = Some(Instant::now());
+            self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
         }
         let shuffle = shuffle_first || self.shuffle_wanted;
         if shuffle
@@ -4934,6 +5101,25 @@ impl App {
         }
     }
 
+    fn note_shuffle_pending(&mut self) {
+        if let Loadable::Loaded(queue) = &self.queue {
+            let at = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
+            let context_uris: Vec<String> = queue.queue[at..]
+                .iter()
+                .map(|item| item.uri().to_string())
+                .collect();
+            if context_uris.len() > 1 && context_uris.iter().any(|uri| uri != &context_uris[0]) {
+                self.queue_shuffle_pending = Some(QueueShufflePending {
+                    current_uri: self.current_track_uri(),
+                    context_uris,
+                    at: Instant::now(),
+                });
+            } else {
+                self.queue_shuffle_pending = None;
+            }
+        }
+    }
+
     fn set_shuffle(&mut self, shuffle: bool) {
         self.shuffle_wanted = shuffle;
         self.shuffle_set_at = Some(Instant::now());
@@ -4941,6 +5127,8 @@ impl App {
         if let Some(assumed) = &mut self.assumed_context {
             assumed.shuffle = Some(shuffle);
         }
+        self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+        self.note_shuffle_pending();
         match self.target() {
             Target::Local => {
                 self.local.shuffle = shuffle;
@@ -5062,7 +5250,7 @@ impl App {
         }
         self.session_dirty = true;
         if announce {
-            self.toast(format!("{label} will play next"));
+            self.toast(format!("{label} added to queue"));
         }
         // Queue tracks and episodes directly on the active local engine.
         // Other targets and item types use the Web API.
@@ -5290,7 +5478,7 @@ impl App {
         }
     }
 
-    fn apply(&mut self, action: Action, ctx: &egui::Context) {
+    pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
         match action {
             Action::Open(page) => self.open(page),
             Action::OpenUri(uri) => {
@@ -5389,7 +5577,7 @@ impl App {
                     self.note_recent_context(&context_uri);
                     self.assumed_context = Some(AssumedContext {
                         uri: context_uri,
-                        shuffle: None,
+                        shuffle: self.shuffle_wanted.then_some(true),
                         at: Instant::now(),
                     });
                 }
@@ -5492,8 +5680,8 @@ impl App {
                     self.queue_one(uri, label, false);
                 }
                 self.toast(match count {
-                    1 => "1 song will play next".to_string(),
-                    count => format!("{count} songs will play next"),
+                    1 => "1 song added to queue".to_string(),
+                    count => format!("{count} songs added to queue"),
                 });
             }
             Action::SetSavedMany { uris, saved } => {
@@ -6168,7 +6356,7 @@ impl App {
         #[cfg(feature = "milkdrop")]
         self.sync_milkdrop(ctx);
         self.apply_actions(ctx);
-        self.sync_media_controls();
+        self.sync_media_controls(ctx);
         self.sync_window_title(ctx);
     }
 
@@ -6257,7 +6445,7 @@ impl App {
         }
         self.apply_actions(ctx);
         self.refresh_frame_now();
-        self.sync_media_controls();
+        self.sync_media_controls(ctx);
 
         if !self.settings.winamp_window && !self.switch_intent {
             if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
@@ -7585,7 +7773,60 @@ mod tests {
         );
     }
 
-    /// Play next inserts after manual queue rows and before context rows.
+    /// Rule: clearing takes back the rows Add to queue added, and the
+    /// context's own copy of the same song is not one of them, however
+    /// recently the song was queued.
+    #[test]
+    fn clearing_a_just_queued_song_leaves_the_contexts_copy_of_it() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:a".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        // What is playing comes to b on its own later on.
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:ctx1",
+                "spotify:track:b",
+                "spotify:track:ctx2",
+            ],
+        );
+        app.apply(
+            Action::AddToQueue {
+                uri: "spotify:track:b".into(),
+                label: "b".into(),
+            },
+            &ctx,
+        );
+        let (_, next) = queue_uris(&app);
+        assert_eq!(
+            next,
+            vec![
+                "spotify:track:b",
+                "spotify:track:ctx1",
+                "spotify:track:b",
+                "spotify:track:ctx2",
+            ],
+            "one row queued on top, the context's own b still below"
+        );
+        assert!(app.can_clear_queue());
+        app.apply(Action::ClearQueue, &ctx);
+        let (_, next) = queue_uris(&app);
+        assert_eq!(
+            next,
+            vec![
+                "spotify:track:ctx1",
+                "spotify:track:b",
+                "spotify:track:ctx2",
+            ],
+            "the queued b goes and the context keeps the b it was going to play"
+        );
+    }
+
+    /// Add to queue inserts after manual queue rows and before context rows.
     #[test]
     fn play_next_queues_after_the_songs_already_queued() {
         let ctx = egui::Context::default();
@@ -7623,6 +7864,10 @@ mod tests {
                 "spotify:track:ctx2",
             ],
             "queued songs keep their order and stay ahead of the context"
+        );
+        assert_eq!(
+            app.toasts.last().map(|toast| toast.message.as_str()),
+            Some("c added to queue")
         );
     }
 
@@ -7750,6 +7995,420 @@ mod tests {
         );
         app.manual_queue.clear();
         assert_eq!(app.queued_rows_len(), 0);
+    }
+
+    /// Changing shuffle rechecks the queue to reflect the new playback order.
+    #[test]
+    fn changing_shuffle_schedules_a_queue_recheck() {
+        let mut app = headless_app();
+        app.queue = loaded_queue("spotify:track:a", &["spotify:track:b"]);
+        assert!(app.queue_recheck_at.is_none());
+        app.set_shuffle(true);
+        assert!(
+            app.queue_recheck_at.is_some(),
+            "toggling shuffle asks Spotify for the reordered queue"
+        );
+    }
+
+    /// Toggling shuffle for local playback rechecks the queue, reveals the
+    /// new playback order without losing hand-queued songs, and ignores an
+    /// old response from before the toggle.
+    #[test]
+    fn shuffling_local_playback_updates_queue_and_keeps_user_songs() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:playing".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.manual_queue = vec!["spotify:track:manual1".into()];
+        app.queue = loaded_queue(
+            "spotify:track:playing",
+            &[
+                "spotify:track:manual1",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+                "spotify:track:ctx3",
+            ],
+        );
+        assert_eq!(app.queued_rows_len(), 1);
+
+        // Toggle shuffle on local player.
+        app.set_shuffle(true);
+        assert!(
+            app.queue_recheck_at.is_some(),
+            "toggling shuffle schedules a queue recheck"
+        );
+
+        // Start the queue refresh with a new sequence number.
+        app.refresh_queue(true);
+        let seq = app.queue_seq;
+
+        // A response from before the shuffle command is dropped unread.
+        let old_response = Queue {
+            currently_playing: Some(queued_song("spotify:track:playing")),
+            queue: vec![
+                queued_song("spotify:track:manual1"),
+                queued_song("spotify:track:ctx1"),
+                queued_song("spotify:track:ctx2"),
+                queued_song("spotify:track:ctx3"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq: seq - 1,
+            result: Ok(old_response),
+        });
+        let (_, next) = queue_uris(&app);
+        assert_eq!(
+            next,
+            vec![
+                "spotify:track:manual1",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+                "spotify:track:ctx3",
+            ],
+            "the superseded pre-shuffle response is dropped unread"
+        );
+
+        // When the fresh response arrives, the context rows reflect the new shuffle
+        // order while manually queued rows stay on top.
+        let shuffled_response = Queue {
+            currently_playing: Some(queued_song("spotify:track:playing")),
+            queue: vec![
+                queued_song("spotify:track:manual1"),
+                queued_song("spotify:track:ctx3"),
+                queued_song("spotify:track:ctx1"),
+                queued_song("spotify:track:ctx2"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq,
+            result: Ok(shuffled_response),
+        });
+
+        let (current, next) = queue_uris(&app);
+        assert_eq!(current.as_deref(), Some("spotify:track:playing"));
+        assert_eq!(
+            next,
+            vec![
+                "spotify:track:manual1",
+                "spotify:track:ctx3",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+            ],
+            "the user's song stays on top and the shuffled context order is shown"
+        );
+        assert_eq!(
+            app.queued_rows_len(),
+            1,
+            "the user's queued section is preserved"
+        );
+    }
+
+    /// Toggling shuffle for remote playback rechecks the queue on confirmation,
+    /// adopts the new shuffle order while keeping hand-queued songs, and drops
+    /// an overtaken response.
+    #[test]
+    fn shuffling_remote_playback_updates_queue_and_keeps_user_songs() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.local_ready = false;
+        app.selected_device = Some("speaker".into());
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                device: Some(crate::api::models::Device {
+                    id: Some("speaker".into()),
+                    name: "Speaker".into(),
+                    is_active: true,
+                    ..Default::default()
+                }),
+                item: Some(crate::api::models::PlayableItem::Track(
+                    crate::api::models::Track {
+                        uri: "spotify:track:playing".into(),
+                        ..Default::default()
+                    },
+                )),
+                is_playing: true,
+                shuffle_state: false,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        app.manual_queue = vec!["spotify:track:manual1".into()];
+        app.queue = loaded_queue(
+            "spotify:track:playing",
+            &[
+                "spotify:track:manual1",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+            ],
+        );
+        assert_eq!(app.queued_rows_len(), 1);
+
+        // Turn on shuffle on the remote target.
+        app.set_shuffle(true);
+        assert!(app.queue_recheck_at.is_some());
+
+        // Spotify confirms the remote shuffle action.
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Shuffle,
+            result: Ok(()),
+        });
+        assert!(
+            app.queue_recheck_at.is_some(),
+            "confirmed remote shuffle rechecks the queue"
+        );
+
+        // Fetch the queue with a new sequence number.
+        app.refresh_queue(true);
+        let seq = app.queue_seq;
+
+        // An older response is ignored.
+        let stale = Queue {
+            currently_playing: Some(queued_song("spotify:track:playing")),
+            queue: vec![
+                queued_song("spotify:track:manual1"),
+                queued_song("spotify:track:ctx1"),
+                queued_song("spotify:track:ctx2"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq: seq - 1,
+            result: Ok(stale),
+        });
+        assert_eq!(
+            queue_uris(&app).1,
+            vec![
+                "spotify:track:manual1",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+            ]
+        );
+
+        // The confirming response shows the new shuffle order.
+        let shuffled = Queue {
+            currently_playing: Some(queued_song("spotify:track:playing")),
+            queue: vec![
+                queued_song("spotify:track:manual1"),
+                queued_song("spotify:track:ctx2"),
+                queued_song("spotify:track:ctx1"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq,
+            result: Ok(shuffled),
+        });
+
+        let (current, next) = queue_uris(&app);
+        assert_eq!(current.as_deref(), Some("spotify:track:playing"));
+        assert_eq!(
+            next,
+            vec![
+                "spotify:track:manual1",
+                "spotify:track:ctx2",
+                "spotify:track:ctx1",
+            ],
+            "remote shuffle preserves hand-queued songs and updates context rows"
+        );
+        assert_eq!(app.queued_rows_len(), 1);
+    }
+
+    /// A stale queue answer whose current track does not match the active
+    /// local player is rejected rather than accepted after a shuffle toggle.
+    #[test]
+    fn stale_queue_after_shuffle_is_retried_and_not_accepted() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:playing".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.queue = loaded_queue(
+            "spotify:track:playing",
+            &["spotify:track:ctx1", "spotify:track:ctx2"],
+        );
+
+        app.set_shuffle(true);
+        app.refresh_queue(true);
+        let seq = app.queue_seq;
+
+        // A stale response that reports an old playing track is rejected.
+        let stale_track_response = Queue {
+            currently_playing: Some(queued_song("spotify:track:old_song")),
+            queue: vec![
+                queued_song("spotify:track:ctx2"),
+                queued_song("spotify:track:ctx1"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq,
+            result: Ok(stale_track_response),
+        });
+
+        assert_eq!(
+            queue_uris(&app).1,
+            vec!["spotify:track:ctx1", "spotify:track:ctx2"],
+            "the queue remains uncorrupted by the stale response"
+        );
+        assert_eq!(app.queue_stale_retries, 1);
+        assert!(app.queue_recheck_at.is_some());
+    }
+
+    /// A lagging queue answer after a shuffle toggle with the same current song
+    /// and sequence is rejected and retried until the new order arrives.
+    #[test]
+    fn lagging_queue_after_shuffle_is_retried_until_new_order_arrives() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:playing".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.manual_queue = vec!["spotify:track:manual1".into()];
+        app.queue = loaded_queue(
+            "spotify:track:playing",
+            &[
+                "spotify:track:manual1",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+                "spotify:track:ctx3",
+            ],
+        );
+
+        app.set_shuffle(true);
+        app.refresh_queue(true);
+        let seq = app.queue_seq;
+
+        // A lagging response arrives with the same currently playing track and
+        // the current sequence, but the context rows are still in the old order.
+        let lagging_response = Queue {
+            currently_playing: Some(queued_song("spotify:track:playing")),
+            queue: vec![
+                queued_song("spotify:track:manual1"),
+                queued_song("spotify:track:ctx1"),
+                queued_song("spotify:track:ctx2"),
+                queued_song("spotify:track:ctx3"),
+            ],
+        };
+
+        app.handle_api(ApiResponse::Queue {
+            seq,
+            result: Ok(lagging_response.clone()),
+        });
+
+        // The stale pre-shuffle order is rejected, preserving the existing queue,
+        // incrementing the retry counter, and scheduling a prompt recheck.
+        assert_eq!(app.queue_stale_retries, 1);
+        assert!(app.queue_recheck_at.is_some());
+        assert_eq!(
+            queue_uris(&app).1,
+            vec![
+                "spotify:track:manual1",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+                "spotify:track:ctx3",
+            ]
+        );
+
+        // A second lagging response also retries.
+        app.handle_api(ApiResponse::Queue {
+            seq,
+            result: Ok(lagging_response),
+        });
+        assert_eq!(app.queue_stale_retries, 2);
+        assert!(app.queue_recheck_at.is_some());
+
+        // Once the reordered response arrives, it is accepted and pending state clears.
+        let new_order_response = Queue {
+            currently_playing: Some(queued_song("spotify:track:playing")),
+            queue: vec![
+                queued_song("spotify:track:manual1"),
+                queued_song("spotify:track:ctx3"),
+                queued_song("spotify:track:ctx1"),
+                queued_song("spotify:track:ctx2"),
+            ],
+        };
+
+        app.handle_api(ApiResponse::Queue {
+            seq,
+            result: Ok(new_order_response),
+        });
+
+        assert_eq!(app.queue_stale_retries, 0);
+        assert!(app.queue_shuffle_pending.is_none());
+        assert_eq!(
+            queue_uris(&app).1,
+            vec![
+                "spotify:track:manual1",
+                "spotify:track:ctx3",
+                "spotify:track:ctx1",
+                "spotify:track:ctx2",
+            ]
+        );
+    }
+
+    /// If Spotify returns an unchanged queue order after shuffle, Fastpotify
+    /// retries up to the limit and then accepts the result as a bounded fallback.
+    #[test]
+    fn unchanged_shuffle_result_has_bounded_fallback() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:playing".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.queue = loaded_queue(
+            "spotify:track:playing",
+            &["spotify:track:ctx1", "spotify:track:ctx2"],
+        );
+
+        app.set_shuffle(true);
+        app.refresh_queue(true);
+        let seq = app.queue_seq;
+
+        let unchanged_response = Queue {
+            currently_playing: Some(queued_song("spotify:track:playing")),
+            queue: vec![
+                queued_song("spotify:track:ctx1"),
+                queued_song("spotify:track:ctx2"),
+            ],
+        };
+
+        // Responses with the pre-shuffle order are rejected as stale and scheduled for retry.
+        for expected_retries in 1..=QUEUE_STALE_RETRIES {
+            app.handle_api(ApiResponse::Queue {
+                seq,
+                result: Ok(unchanged_response.clone()),
+            });
+            assert_eq!(app.queue_stale_retries, expected_retries);
+            assert!(app.queue_recheck_at.is_some());
+        }
+
+        // The next response exceeds the retry limit, so Fastpotify accepts it.
+        app.handle_api(ApiResponse::Queue {
+            seq,
+            result: Ok(unchanged_response),
+        });
+        assert_eq!(app.queue_stale_retries, 0);
+        assert!(app.queue_shuffle_pending.is_none());
+        assert_eq!(
+            queue_uris(&app).1,
+            vec!["spotify:track:ctx1", "spotify:track:ctx2"]
+        );
     }
 
     fn picked(app: &App, page: &Page) -> Vec<usize> {
@@ -8122,6 +8781,78 @@ mod tests {
         assert!(app.queue_playlist_name().starts_with("Queue "));
     }
 
+    /// The queue names where the playing song comes from and opens it.
+    /// A radio has no page; a context whose name has not loaded is still
+    /// named by kind so it can open.
+    #[test]
+    fn playing_from_names_the_context_and_its_page() {
+        let mut app = headless_app();
+        assert_eq!(app.playing_from(), None, "no context, no line");
+        let assume = |app: &mut App, uri: &str| {
+            app.assumed_context = Some(AssumedContext {
+                uri: uri.into(),
+                shuffle: None,
+                at: Instant::now(),
+            });
+        };
+        let named = |app: &App| {
+            let from = app.playing_from().expect("a context is playing");
+            (from.name, from.page)
+        };
+
+        app.library.playlists = Loadable::Loaded(vec![crate::api::models::Playlist {
+            id: "pl9".into(),
+            uri: "spotify:playlist:pl9".into(),
+            name: "Long Way Home".into(),
+            ..Default::default()
+        }]);
+        assume(&mut app, "spotify:playlist:pl9");
+        assert_eq!(
+            named(&app),
+            ("Long Way Home".into(), Some(Page::Playlist("pl9".into())))
+        );
+        assume(&mut app, "spotify:playlist:unloaded");
+        assert_eq!(
+            named(&app),
+            ("Playlist".into(), Some(Page::Playlist("unloaded".into())))
+        );
+
+        app.album_pages.insert(
+            "alb1".into(),
+            AlbumPage {
+                album: Loadable::Loaded(crate::api::models::Album {
+                    id: "alb1".into(),
+                    uri: "spotify:album:alb1".into(),
+                    name: "Black Sands".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assume(&mut app, "spotify:album:alb1");
+        assert_eq!(
+            named(&app),
+            ("Black Sands".into(), Some(Page::Album("alb1".into())))
+        );
+
+        assume(&mut app, "spotify:user:me:collection");
+        assert_eq!(named(&app), ("Liked Songs".into(), Some(Page::LikedSongs)));
+
+        app.track_cache.insert(
+            "xyz".into(),
+            crate::api::models::Track {
+                id: Some("xyz".into()),
+                uri: "spotify:track:xyz".into(),
+                name: "Wish You Were Here".into(),
+                ..Default::default()
+            },
+        );
+        assume(&mut app, "spotify:station:track:xyz");
+        assert_eq!(named(&app), ("Wish You Were Here Radio".into(), None));
+        assume(&mut app, "spotify:station:track:uncached");
+        assert_eq!(named(&app), ("Radio".into(), None));
+    }
+
     /// Song radio opens the queue panel.
     #[test]
     fn song_radio_opens_the_queue() {
@@ -8246,6 +8977,7 @@ mod tests {
     /// checking it, so a URL that does not answer aborts the process. The
     /// sync runs every frame, so the answer is remembered -- which means
     /// emptying the cache has to forget it, or the path outlives the file.
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn the_media_controls_only_hear_about_artwork_that_exists() {
         // #given
@@ -8257,14 +8989,21 @@ mod tests {
         std::fs::write(&file, b"jpeg-ish").expect("a cached file");
 
         // #then nothing has been downloaded for this song yet
-        assert_eq!(app.media_art_file(url), None);
+        assert_eq!(app.media_art_file(&ctx, url), None);
+        assert!(
+            !app.backend.art().prefetch(&ctx, url),
+            "the miss should have started the download"
+        );
 
         // #when the cache holds it, that file is what the controls are told
         app.media_art = Some((url.to_owned(), file.clone()));
-        assert_eq!(app.media_art_file(url), Some(file.clone()));
+        assert_eq!(app.media_art_file(&ctx, url), Some(file.clone()));
 
         // #then another song is not covered by what is remembered
-        assert_eq!(app.media_art_file("https://i.scdn.co/image/def"), None);
+        assert_eq!(
+            app.media_art_file(&ctx, "https://i.scdn.co/image/def"),
+            None
+        );
 
         // #when the artwork cache is emptied, the remembered path goes too
         app.actions.push(Action::ClearArtCache);
@@ -8272,6 +9011,49 @@ mod tests {
         assert_eq!(app.media_art, None, "a path into a deleted cache");
 
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// MPRIS hands the desktop the artwork URL and reads no file, so the
+    /// controls have nothing to download for it: the full-size cover is
+    /// fetched on the platforms that load the image themselves.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_media_controls_are_told_no_file_and_download_nothing() {
+        // #given
+        let mut app = headless_app();
+        let ctx = egui::Context::default();
+        let url = "https://i.scdn.co/image/abc";
+
+        // #then MPRIS is left to the URL alone
+        assert_eq!(app.media_art_file(&ctx, url), None);
+        assert!(
+            app.backend.art().prefetch(&ctx, url),
+            "a download was started for artwork nothing here reads"
+        );
+    }
+
+    /// Emptying the artwork cache has to let the cover come back. The files
+    /// are gone, so what the loader remembers of them goes too: an entry
+    /// left behind answers the next request with a file that is no longer
+    /// there, and the playing song stays coverless until the track changes.
+    #[test]
+    fn clearing_the_artwork_cache_lets_the_cover_come_back() {
+        // #given artwork that has already been asked for
+        let mut app = headless_app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let url = "https://i.scdn.co/image/abc";
+        assert!(app.backend.art().prefetch(&ctx, url), "the first request");
+
+        // #when the artwork cache is emptied
+        app.actions.push(Action::ClearArtCache);
+        app.apply_actions(&ctx);
+
+        // #then the next request downloads it again
+        assert!(
+            app.backend.art().prefetch(&ctx, url),
+            "the loader still remembers artwork that has been deleted"
+        );
     }
 
     fn headless_app() -> App {
@@ -9574,7 +10356,7 @@ mod tests {
             is_active: true,
             ..Device::default()
         }])));
-        app.sync_media_controls();
+        app.sync_media_controls(&egui::Context::default());
 
         // #then
         let written = slot.lock().expect("the slot").clone();

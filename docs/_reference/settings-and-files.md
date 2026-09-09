@@ -26,9 +26,19 @@ Fastpotify follows each platform's conventions. On Linux:
 | Crash log | `~/.local/state/fastpotify/panic.log` | Always |
 
 Clearing caches never signs you out; credentials live in *state*, not
-*cache*. Web API token files are written with owner-only permissions.
-Signing out from Settings deletes both Web API grants and the separate
-playback credential.
+*cache*. Signing out from Settings deletes both Web API grants and the
+separate playback credential.
+
+The Web API files contain access and refresh tokens, and the playback
+credential can be reused to sign in. These are unencrypted files, not entries
+in the operating system's credential store. On Unix, the Web API writer
+requests mode `0600` (owner read/write) when creating a file; it does not
+repair permissions on an existing temporary file. On Windows, permissions
+are inherited from the containing directory. Librespot's playback credential
+writer uses the system's default file permissions, including the Unix umask
+or inherited Windows access rules, without explicitly restricting them to
+the owner. Keep token files, their temporary copies, and the `credentials/`
+directory out of issue attachments and diagnostic uploads.
 
 Progress through a playlist is periodically cached as a contiguous prefix.
 When the playlist has not changed on Spotify, reopening it resumes from that

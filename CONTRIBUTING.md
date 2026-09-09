@@ -32,6 +32,10 @@ answered from there and closed.
 Duplicate, out-of-scope, or incomplete issues may be closed with a short
 explanation.
 
+A bug can be closed once its fix is on `main` and the relevant checks pass,
+with the commit and release status stated. Reporter confirmation is welcome
+but is not required for closure. Reopen the issue if it persists after updating.
+
 ## Automated triage
 
 Copilot assesses new and reopened issues, new discussions, and new or edited
@@ -80,6 +84,12 @@ contains only the GitHub node ID and, for comments, the assessed edit timestamp.
 Keep each pull request to one change. Explain why it belongs in Fastpotify,
 what changed, and how you tested it. Avoid unrelated formatting, refactors,
 generated prose, and large mechanical rewrites.
+
+`main` has a linear history. Outside pull requests are squash-merged into one
+focused commit with contributor credit; merge commits are not accepted.
+Maintainer work is committed directly on `main`, one topic per commit. Use
+fast-forward-only pulls and rebase unpublished local commits when needed.
+Do not rewrite published history without explicit maintainer approval.
 
 The same rules apply to hand-written and AI-assisted changes. The author must
 understand every line and answer review comments with specific reasoning.

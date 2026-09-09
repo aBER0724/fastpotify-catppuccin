@@ -23,6 +23,12 @@ fn decoded_and_texture_bytes(width: usize, height: usize) -> usize {
     2 * width.saturating_mul(height).saturating_mul(4)
 }
 
+/// What this loader answers for. egui offers it every URI, and artwork that
+/// is not fetched over the network belongs to another loader.
+fn is_http(uri: &str) -> bool {
+    uri.starts_with("https://") || uri.starts_with("http://")
+}
+
 enum Entry {
     Pending,
     Ready {
@@ -118,6 +124,26 @@ impl ArtLoader {
         std::fs::metadata(&path)
             .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
             .then_some(path)
+    }
+
+    /// Starts the download for `url` while nothing is drawing it, so the
+    /// media controls have a file to hand the platform, and answers whether
+    /// this call is what started it.
+    ///
+    /// Artwork already held, already on its way, or addressed by a scheme
+    /// this loader does not answer for is left alone.
+    pub fn prefetch(&self, ctx: &egui::Context, url: &str) -> bool {
+        if !is_http(url) {
+            return false;
+        }
+        let mut entries = self.inner.entries.lock().unwrap_or_else(|p| p.into_inner());
+        if entries.contains_key(url) {
+            return false;
+        }
+        entries.insert(url.to_string(), Entry::Pending);
+        drop(entries);
+        self.inner.start(ctx, url.to_string());
+        true
     }
 
     /// Drops held JPEG bytes once egui has made a texture. The disk cache
@@ -285,7 +311,7 @@ impl BytesLoader for ArtLoader {
     }
 
     fn load(&self, ctx: &egui::Context, uri: &str) -> BytesLoadResult {
-        if !(uri.starts_with("https://") || uri.starts_with("http://")) {
+        if !is_http(uri) {
             return Err(LoadError::NotSupported);
         }
         let mut entries = self.inner.entries.lock().unwrap_or_else(|p| p.into_inner());
@@ -422,6 +448,44 @@ mod tests {
 
         std::fs::write(&path, b"\xff\xd8\xff jpeg-ish").expect("a file with bytes");
         assert_eq!(loader.cached_file(url), Some(path));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prefetching_starts_one_download_and_not_another() {
+        let dir = std::env::temp_dir().join(format!("fastpotify-prefetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime to hand the loader");
+        let loader = ArtLoader::new(
+            reqwest::Client::new(),
+            runtime.handle().clone(),
+            dir.clone(),
+        );
+        let ctx = egui::Context::default();
+        let url = "https://i.scdn.co/image/never-drawn";
+
+        assert!(loader.prefetch(&ctx, url), "nobody has asked for it yet");
+        assert!(!loader.prefetch(&ctx, url), "it is already on its way");
+
+        // A scheme the loader does not answer for is refused outright, the
+        // same as in `load`, and nothing is remembered about it.
+        let local = "file:///tmp/cover.jpg";
+        assert!(
+            !loader.prefetch(&ctx, local),
+            "not a URL this loader fetches"
+        );
+        assert!(
+            !loader
+                .inner
+                .entries
+                .lock()
+                .expect("the entries")
+                .contains_key(local),
+            "a URI it cannot fetch was remembered anyway"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

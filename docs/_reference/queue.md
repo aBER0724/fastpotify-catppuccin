@@ -1,6 +1,6 @@
 ---
 title: The Queue's Rules
-description: What the queue shows, what Play next does, and what the app promises about both.
+description: What the queue shows, what Add to queue does, and what the app promises about both.
 nav_order: 2
 ---
 
@@ -9,13 +9,19 @@ under **Playing next**, are the songs you queued yourself. Below them,
 under **Next up**, are the songs that come next in whatever playlist or
 album is playing. Your songs always play first.
 
+Above both, **Playing from** names where the playing song came from: the
+playlist, album, artist, or podcast, which opens when clicked, Liked
+Songs, or a song radio named after its song. A radio has no page of its
+own, so its name is plain text. The line shows only while a song is
+playing from somewhere Spotify reports.
+
 These are the rules the app follows. The queue tests in `src/app.rs`
 check every one of them.
 
 1. **The list shows the play order.** The top row plays next, followed by the
    rows below it.
 
-2. **Play next adds a song to your part of the queue.** It goes after
+2. **Add to queue adds a song to your part of the queue.** It goes after
    the songs you queued earlier and before the playlist's songs. Queue
    the same song twice and it plays twice. A double-click only counts
    once.
@@ -43,6 +49,8 @@ check every one of them.
 
 8. **Changes appear immediately.** Fastpotify updates the queue before Spotify
    confirms the change. For local playback, it updates its own player directly.
+   Toggling shuffle rechecks the queue so the new playback order appears
+   promptly without waiting for the song to finish.
 
 9. **Closing the app keeps the queue.** Fastpotify saves it locally. When you
    resume the last song, it restores your queued songs and playlist position.

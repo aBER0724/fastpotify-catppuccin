@@ -21,7 +21,11 @@ local playback:
    browser approval and stores its own reusable credential. Spotify Premium
    is required.
 
-Local playback authorization stays separate from both Web API grants.
+Local playback authorization stays separate from both Web API grants. Its
+browser approval requests only the streaming permission and always shows the
+consent dialog. The playback session uses the account ID verified by either
+Web API grant. A verified personal app can complete sign-in while the shared
+app's verification is still waiting.
 
 By default, Fastpotify uses the public app shared with spotify-player, ncspot,
 and Omarchy Spotify. Spotify divides its quota among all users. A personal app
@@ -30,17 +34,22 @@ adds a separate Development Mode quota. See
 
 ## What the client stores
 
-- Shared and personal Web API refresh tokens, plus librespot's credential, in
-  the state directory with owner-only permissions
-  ([file locations](/settings-and-files/)).
+- Shared and personal Web API access and refresh tokens, plus librespot's
+  reusable playback credential, in unencrypted files in the state directory.
+  Newly created Web API token files request owner-only permissions on Unix;
+  Windows uses inherited file permissions. Librespot's credential writer
+  relies on system defaults and does not explicitly set owner-only permissions.
+  See [file locations and protection](/settings-and-files/).
 - Downloaded audio and artwork, in the cache directory, within the budget
   you set.
 - The first time MilkDrop opens with an empty preset folder, the two projectM
   preset packs are downloaded from GitHub (about 26 MB) and stored in the
   config directory.
-- On Windows and macOS, desktop media controls receive artwork from that
-  cache instead of downloading the Spotify image a second time. Linux MPRIS
-  carries the Spotify artwork URL for the desktop to resolve.
+- On Windows and macOS, desktop media controls load the cover themselves and
+  are given a file, so the full-size artwork is downloaded into that cache
+  when a song starts, even when no view on screen is showing it. Linux MPRIS
+  carries the Spotify artwork URL for the desktop to resolve and asks for
+  nothing extra.
 - Lyrics, in the cache directory, for a month.
 - Fastpotify has no telemetry, analytics, or hosted service. When the lyrics
   panel is open and Spotify has no lyrics, it sends the track's artist, title,
@@ -74,7 +83,14 @@ Spotify's device list only shows signed-in receivers. A new librespot or
 spotifyd receiver is therefore invisible to the Web API.
 
 Receivers announce themselves over mDNS as `_spotify-connect._tcp` and answer
-a small HTTP interface. Fastpotify encrypts the stored librespot credential
+a small HTTP interface. Opening or refreshing the picker first reads
+`getInfo` to find each receiver's name and device ID. These probes run off
+the UI thread, four at a time, with a two-second limit per receiver and six
+seconds overall after discovery. Only responding receivers with a name and
+ID are offered. Matching IDs are combined; separate devices can have the
+same name. These reads send no account credential.
+
+When a receiver is selected, Fastpotify encrypts the stored librespot credential
 with a receiver-specific key and a key from a Diffie-Hellman exchange. The
 encrypted value only works for that receiver and exchange. Fastpotify does not
 save another copy of the credential.

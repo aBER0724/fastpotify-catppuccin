@@ -9,6 +9,27 @@ use crate::theme::{self, Icon};
 
 pub const BUTTON_RECT_ID: &str = "devices-button-rect";
 
+fn receiver_is_listed(receiver: &crate::zeroconf::Receiver, devices: &[Device]) -> bool {
+    devices
+        .iter()
+        .any(|device| match receiver.device_id.as_deref() {
+            Some(id) => device.id.as_deref() == Some(id),
+            None => device.name == receiver.name,
+        })
+}
+
+fn name_devices(devices: &mut [Device], receivers: &[crate::zeroconf::Receiver]) {
+    for device in devices {
+        if device.id.is_some()
+            && let Some(receiver) = receivers
+                .iter()
+                .find(|receiver| receiver.device_id == device.id)
+        {
+            device.name.clone_from(&receiver.name);
+        }
+    }
+}
+
 pub fn device_icon(kind: &str) -> Icon {
     match kind.to_ascii_lowercase().as_str() {
         "computer" => Icon::Laptop,
@@ -211,101 +232,112 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                     crate::app::Target::Remote(id) => id,
                 };
                 devices.sort_by_key(|device| device.id != active_id);
+                name_devices(&mut devices, &app.receivers);
+                let mut seen = std::collections::HashSet::new();
+                devices
+                    .retain(|device| device.id.as_ref().is_none_or(|id| seen.insert(id.clone())));
 
                 // Receivers on the network that Spotify has not listed yet.
                 // They are real speakers the user can see in the official
                 // client, so offering them here is the whole point.
-                let listed: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
                 let waiting: Vec<crate::zeroconf::Receiver> = app
                     .receivers
                     .iter()
-                    .filter(|receiver| !listed.iter().any(|name| name == &receiver.name))
+                    .filter(|receiver| !receiver_is_listed(receiver, &devices))
                     .cloned()
                     .collect();
 
-                if !app.local_ready {
-                    enable_playback_row(app, ui);
-                }
-                if devices.is_empty() && waiting.is_empty() && app.local_ready {
-                    ui.add_space(8.0);
-                    theme::subtle(
-                        ui,
-                        &palette,
-                        "No devices found. Open Spotify on another device, then refresh.",
-                    );
-                    ui.add_space(8.0);
-                }
+                let max_height = (position.y - ctx.content_rect().top() - 62.0).clamp(52.0, 416.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("connect-device-list")
+                    .max_height(max_height)
+                    .show(ui, |ui| {
+                        if !app.local_ready {
+                            enable_playback_row(app, ui);
+                        }
+                        if devices.is_empty() && waiting.is_empty() && app.local_ready {
+                            ui.add_space(8.0);
+                            theme::subtle(
+                                ui,
+                                &palette,
+                                "No devices found. Open Spotify on another device, then refresh.",
+                            );
+                            ui.add_space(8.0);
+                        }
 
-                for device in &devices {
-                    let is_local = device.id.is_some() && device.id == local_id;
-                    let active = device.id.is_some() && device.id == active_id;
-                    let name = if is_local && !device.name.contains("this computer") {
-                        format!("{} (this computer)", device.name)
-                    } else {
-                        device.name.clone()
-                    };
-                    let (rect, response) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
-                    if response.hovered() {
-                        ui.painter().rect_filled(
-                            rect,
-                            CornerRadius::same(6),
-                            palette.surface_hover,
-                        );
-                    }
-                    let color = if active { palette.accent } else { palette.text };
-                    let icon_rect = Rect::from_center_size(
-                        pos2(rect.left() + 24.0, rect.center().y),
-                        egui::Vec2::splat(22.0),
-                    );
-                    device_icon(&device.kind)
-                        .image(color, 22.0)
-                        .paint_at(ui, icon_rect);
-                    let painter = ui.painter().with_clip_rect(rect);
-                    crate::bidi::paint_line(
-                        &painter,
-                        rect.left() + 48.0,
-                        rect.right() - 12.0,
-                        rect.center().y - 9.0,
-                        &name,
-                        theme::medium(14.0),
-                        color,
-                    );
-                    let status = if active {
-                        "Listening on this device".to_string()
-                    } else if device.is_restricted {
-                        "Restricted".to_string()
-                    } else if is_local {
-                        "Play here".to_string()
-                    } else {
-                        device.kind.replace('_', " ")
-                    };
-                    painter.text(
-                        pos2(rect.left() + 48.0, rect.center().y + 10.0),
-                        egui::Align2::LEFT_CENTER,
-                        status,
-                        theme::regular(12.0),
-                        if active {
-                            palette.accent
-                        } else {
-                            palette.secondary
-                        },
-                    );
-                    if active {
-                        let dot = pos2(rect.right() - 16.0, rect.center().y);
-                        ui.painter().circle_filled(dot, 4.0, palette.accent);
-                    }
-                    if response.clicked()
-                        && !active
-                        && let Some(id) = &device.id
-                    {
-                        app.actions.push(Action::Transfer(id.clone()));
-                    }
-                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                }
-                for receiver in &waiting {
-                    receiver_row(app, ui, receiver);
-                }
+                        for device in &devices {
+                            let is_local = device.id.is_some() && device.id == local_id;
+                            let active = device.id.is_some() && device.id == active_id;
+                            let name = if is_local && !device.name.contains("this computer") {
+                                format!("{} (this computer)", device.name)
+                            } else {
+                                device.name.clone()
+                            };
+                            let (rect, response) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 52.0),
+                                Sense::click(),
+                            );
+                            if response.hovered() {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    CornerRadius::same(6),
+                                    palette.surface_hover,
+                                );
+                            }
+                            let color = if active { palette.accent } else { palette.text };
+                            let icon_rect = Rect::from_center_size(
+                                pos2(rect.left() + 24.0, rect.center().y),
+                                egui::Vec2::splat(22.0),
+                            );
+                            device_icon(&device.kind)
+                                .image(color, 22.0)
+                                .paint_at(ui, icon_rect);
+                            let painter = ui.painter().with_clip_rect(rect);
+                            crate::bidi::paint_line(
+                                &painter,
+                                rect.left() + 48.0,
+                                rect.right() - 12.0,
+                                rect.center().y - 9.0,
+                                &name,
+                                theme::medium(14.0),
+                                color,
+                            );
+                            let status = if active {
+                                "Listening on this device".to_string()
+                            } else if device.is_restricted {
+                                "Restricted".to_string()
+                            } else if is_local {
+                                "Play here".to_string()
+                            } else {
+                                device.kind.replace('_', " ")
+                            };
+                            painter.text(
+                                pos2(rect.left() + 48.0, rect.center().y + 10.0),
+                                egui::Align2::LEFT_CENTER,
+                                status,
+                                theme::regular(12.0),
+                                if active {
+                                    palette.accent
+                                } else {
+                                    palette.secondary
+                                },
+                            );
+                            if active {
+                                let dot = pos2(rect.right() - 16.0, rect.center().y);
+                                ui.painter().circle_filled(dot, 4.0, palette.accent);
+                            }
+                            if response.clicked()
+                                && !active
+                                && let Some(id) = &device.id
+                            {
+                                app.actions.push(Action::Transfer(id.clone()));
+                            }
+                            response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        }
+                        for receiver in &waiting {
+                            receiver_row(app, ui, receiver);
+                        }
+                    });
             });
         });
     let popup_rect = area.response.rect;
@@ -318,5 +350,43 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
     });
     if clicked_outside {
         app.show_devices = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_receivers_identity_matches_even_when_its_advertised_name_differs() {
+        let receiver = crate::zeroconf::Receiver {
+            name: "SpotifyConnect".into(),
+            device_id: Some("living-room".into()),
+            address: "127.0.0.1".parse().unwrap(),
+            port: 80,
+            path: "/".into(),
+        };
+        let mut device = Device {
+            id: Some("living-room".into()),
+            name: "Living Room".into(),
+            ..Default::default()
+        };
+        assert!(receiver_is_listed(&receiver, &[device.clone()]));
+        let mut named = [Device {
+            name: "unnamed".into(),
+            ..device.clone()
+        }];
+        name_devices(&mut named, std::slice::from_ref(&receiver));
+        assert_eq!(named[0].name, receiver.name);
+        assert_eq!(
+            named[0].id, device.id,
+            "renaming preserves the transfer target"
+        );
+        device.id = Some("other-room".into());
+        device.name = receiver.name.clone();
+        assert!(
+            !receiver_is_listed(&receiver, &[device]),
+            "two identities may have the same name"
+        );
     }
 }

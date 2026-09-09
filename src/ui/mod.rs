@@ -2,7 +2,7 @@
 
 pub mod artist;
 pub mod collection;
-mod devices;
+pub(crate) mod devices;
 mod dialogs;
 pub mod home;
 mod keys;

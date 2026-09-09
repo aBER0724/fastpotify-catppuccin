@@ -67,12 +67,23 @@ You can rename it in Settings.
 - **Closing the window does not stop the music.** Fastpotify keeps playing
   from the system tray; reopen it from the tray icon and quit from the tray
   menu or Ctrl+Q. On macOS you can also reopen it from the Dock. Settings can
-  turn this off.
+  turn this off. On Linux, including Flatpak, a desktop with a working system
+  tray is required for this behavior.
+- **Play and Pause fade.** With the default audio backend, music played on
+  this computer fades in or out to avoid a hard cut. Gapless transitions
+  between songs and playback on another device are unchanged.
 - **Play buttons show progress.** The button spins until Spotify responds.
 - **Common actions have shortcuts.** Space plays and pauses, Ctrl+F or `/`
   searches, and `Q` opens the queue. Ctrl+/ shows the full list.
 - **Rows and cards have context menus.** Right-click a song, playlist, album,
   or artist to see actions such as queue, save, add to playlist, and copy link.
+  Search's **Top result** card has the menu for the song, artist, album,
+  playlist, or podcast it shows. Search shelves and filtered grids, and Home's
+  playlist shortcuts, Made for you, Recently played, and top artist cards offer
+  the same menus. Your own playlists include **Edit details** and **Delete**.
+  **Add to playlist** includes a local name filter for the playlists you can
+  edit, for either one song or a selection. **New playlist** stays available
+  when no names match.
   If the playlist already contains the song, Fastpotify asks before adding
   another copy.
 - **Spotify links open in Fastpotify.** A `spotify:` link shared from another
